@@ -1,0 +1,189 @@
+///// bridge
+import paho.mqtt.client as mqtt
+import serial
+import json
+import time
+import sys
+
+# --- CONFIGURAZIONE ---
+BROKER_ADDRESS = "31.14.140.180" 
+PORT = 1883
+USER = "skier"
+PASSWORD = "IoTskier1" 
+
+GATE_ID = "gate_A"
+TOPIC_CMD = f"unimore_ski/turnstiles/{GATE_ID}/set"
+
+# Porta Seriale (Verifica su Arduino IDE quale porta usa!)
+SERIAL_PORT = 'COM3' 
+BAUD_RATE = 9600
+
+# --- SETUP SERIALE ---
+try:
+    arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2) 
+    print(f"[HW] Arduino connesso su {SERIAL_PORT}")
+except Exception as e:
+    print(f"[ERRORE] Arduino non trovato: {e}")
+    sys.exit()
+
+def on_connect(client, userdata, flags, rc, properties=None):
+    if rc == 0:
+        print(f"[NET] Connesso! Ascolto su: {TOPIC_CMD}")
+        client.subscribe(TOPIC_CMD)
+    else:
+        print(f"[NET] Errore connessione: {rc}")
+
+def on_message(client, userdata, msg):
+    try:
+        payload_str = msg.payload.decode()
+        print(f"\n[RX] JSON Ricevuto: {payload_str}")
+        
+        dati = json.loads(payload_str)
+        
+        # 1. Estrazione dati dal Twin
+        traffic = dati.get("traffic_light", "RED") # RED, GREEN, YELLOW
+        display = dati.get("display_msg", "Errore")
+        flow = dati.get("flow_rate", 0) # 0, 2, 10...
+        
+        # 2. Conversione Logica (Flow -> Millisecondi Lampeggio)
+        # Se flow è 0 -> LED spento (0 ms)
+        # Se flow è basso (2) -> Lampeggio lento (500 ms)
+        # Se flow è alto (10) -> Lampeggio veloce (100 ms)
+        blue_speed = 0
+        if flow == 0:
+            blue_speed = 0
+        elif flow < 5:
+            blue_speed = 500 # Lento
+        else:
+            blue_speed = 100 # Veloce
+            
+        # 3. Costruzione Stringa Protocollo per Arduino
+        # Formato: "COLORE|MESSAGGIO|VELOCITA_BLU\n"
+        comando_seriale = f"{traffic}|{display}|{blue_speed}\n"
+        
+        # 4. Invio
+        arduino.write(comando_seriale.encode())
+        print(f"[TX ARDUINO] Inviato: {comando_seriale.strip()}")
+            
+    except Exception as e:
+        print(f"[ERRORE] {e}")
+
+# --- MAIN ---
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+client.username_pw_set(USER, PASSWORD)
+client.on_connect = on_connect
+client.on_message = on_message
+
+print("Avvio Bridge Tornello...")
+client.connect(BROKER_ADDRESS, PORT, 60)
+client.loop_forever()
+
+
+///// arduino:
+
+#include <LiquidCrystal.h>
+
+// --- CONFIGURAZIONE PIN ---
+int rosso1  = 2;
+int giallo1 = 3;
+int verde1  = 4;
+int blu1    = 5;
+
+// LCD (RS, E, D4, D5, D6, D7)
+LiquidCrystal lcd(12, 11, 6, 7, 8, 9);
+
+// Variabili Gestione
+String inputString = "";         
+int bluStato = LOW;
+unsigned long previousMillis = 0;
+int intervalloBlu = 0;  // 0 = spento
+
+void setup() {
+  pinMode(rosso1, OUTPUT);
+  pinMode(giallo1, OUTPUT);
+  pinMode(verde1, OUTPUT);
+  pinMode(blu1, OUTPUT);
+
+  // Test iniziale luci
+  digitalWrite(rosso1, HIGH); delay(200); digitalWrite(rosso1, LOW);
+  digitalWrite(giallo1, HIGH); delay(200); digitalWrite(giallo1, LOW);
+  digitalWrite(verde1, HIGH); delay(200); digitalWrite(verde1, LOW);
+
+  lcd.begin(16, 2);
+  lcd.print("STARTING SYSTEM...");
+  lcd.setCursor(0, 1);
+  lcd.print("WAITING DATAs...");
+
+  Serial.begin(9600); 
+  inputString.reserve(200);
+}
+
+void loop() {
+  // 1. LETTURA SERIALE (Compatibile Arduino R4)
+  while (Serial.available()) {
+    char inChar = (char)Serial.read();
+    
+    // Se arriva il comando di fine riga, eseguiamo
+    if (inChar == '\n') {
+      parseCommand(inputString);
+      inputString = ""; // Reset stringa
+    } else {
+      inputString += inChar; // Accumula caratteri
+    }
+  }
+
+  // 2. GESTIONE LAMPEGGIO BLU (Non bloccante)
+  if (intervalloBlu > 0) {
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousMillis >= intervalloBlu) {
+      previousMillis = currentMillis;
+      bluStato = !bluStato;
+      digitalWrite(blu1, bluStato);
+    }
+  } else {
+    digitalWrite(blu1, LOW); // Spegni se intervallo è 0
+  }
+}
+
+// Funzione di Parsing: "COLORE|MESSAGGIO|VELOCITA_BLU"
+void parseCommand(String data) {
+  data.trim(); // Rimuove spazi vuoti
+  
+  int firstPipe = data.indexOf('|');
+  int secondPipe = data.indexOf('|', firstPipe + 1);
+
+  if (firstPipe > 0 && secondPipe > 0) {
+    String colorCmd = data.substring(0, firstPipe);
+    String lcdMsg = data.substring(firstPipe + 1, secondPipe);
+    String speedStr = data.substring(secondPipe + 1);
+    
+    // --- AZIONI ---
+
+    // A. Semaforo
+    digitalWrite(rosso1, LOW);
+    digitalWrite(giallo1, LOW);
+    digitalWrite(verde1, LOW);
+
+    if (colorCmd == "RED") digitalWrite(rosso1, HIGH);
+    else if (colorCmd == "YELLOW") digitalWrite(giallo1, HIGH);
+    else if (colorCmd == "GREEN") digitalWrite(verde1, HIGH);
+
+    // B. LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("STATO: " + colorCmd);
+    lcd.setCursor(0, 1);
+    // Tronca messaggio se troppo lungo per evitare errori grafici
+    if(lcdMsg.length() > 16) lcdMsg = lcdMsg.substring(0, 16);
+    lcd.print(lcdMsg);
+
+    // C. Led Blu
+    intervalloBlu = speedStr.toInt();
+    
+    // Debug verso PC
+    Serial.println("ACK: OK"); 
+  }
+}
+
+
