@@ -1,13 +1,12 @@
 # this file represent the bridge that connects Arduino to MQTT broker on VPS
 
-
 import paho.mqtt.client as mqtt
 import serial
 import json
 import time
 import sys
 
-# --- CONFIGURAZIONE ---
+# --- SETTINGS ---
 BROKER_ADDRESS = "31.14.140.180" 
 PORT = 1883
 USER = "skier"
@@ -16,68 +15,75 @@ PASSWORD = "IoTskier1"
 GATE_ID = "gate_A"
 TOPIC_CMD = f"unimore_ski/turnstiles/{GATE_ID}/set"
 
-# Porta Seriale (Verifica su Arduino IDE quale porta usa!)
+# SERIAL PORT 
 SERIAL_PORT = 'COM3' 
 BAUD_RATE = 9600
 
-# --- SETUP SERIALE ---
+# --- sERIAL SETUP ---
+'''
+when python opens a serial port on windows, the OS send 
+automatically a signal on pin DTR and RTS. since DTR is automatically connected to RESET by tefault 
+it restarts evry time i connect the bridge blocking communication for a while.
+'''
 try:
-    # Aggiunti dtr=False e rts=False per stabilità su Windows
     arduino = serial.Serial()
     arduino.port = SERIAL_PORT
     arduino.baudrate = BAUD_RATE
     arduino.timeout = 1
-    arduino.setDTR(False)
-    arduino.setRTS(False)
+    arduino.setDTR(False)                                   #win stability (don't send signal)
+    arduino.setRTS(False)                                   #win stability
     arduino.open()
     
     time.sleep(2) 
-    print(f"[HW] Arduino connesso su {SERIAL_PORT}")
+    print(f"[HW] Arduino is CONNECTED on serial port: {SERIAL_PORT}")
 except Exception as e:
-    print(f"[ERRORE] Arduino non trovato: {e}")
+    print(f"[ERROR] Arduino not find: {e}")
     sys.exit()
+
 
 def on_connect(client, userdata, flags, rc, properties=None):
     if rc == 0:
-        print(f"[NET] Connesso! Ascolto su: {TOPIC_CMD}")
+        print(f"[NET] Connected! listening on : {TOPIC_CMD}")
         client.subscribe(TOPIC_CMD)
     else:
         print(f"[NET] Errore connessione: {rc}")
 
+
 def on_message(client, userdata, msg):
     try:
-        payload_str = msg.payload.decode()
-        print(f"\n[RX] JSON Ricevuto: {payload_str}")
+        payload_str = msg.payload.decode()                              #decoding bytes into mqtt string
+        print(f"\n[RX] JSON recived: \n[RX]{payload_str}")
         
-        dati = json.loads(payload_str)
+        dati = json.loads(payload_str)                                  #takes data into dictionary
         
-        # 1. Estrazione dati dal Twin
-        traffic = dati.get("traffic_light", "RED") # RED, GREEN, YELLOW
-        display = dati.get("display_msg", "Errore")
+        # 1. Extracting Data From Twin:
+        traffic = dati.get("traffic_light", "RED")                      # RED, GREEN, YELLOW
+        display = dati.get("display_msg", "Error")                      #default is needed  if keys is not found
         flow = dati.get("flow_rate", 0) # 0, 2, 10...
         
-        # 2. Conversione Logica (Flow -> Millisecondi Lampeggio)
-        # Se flow è 0 -> LED spento (0 ms)
-        # Se flow è basso (2) -> Lampeggio lento (500 ms)
-        # Se flow è alto (10) -> Lampeggio veloce (100 ms)
+        # 2. logic Conversion (Flow -> Millisecondi Lampeggio)
+        # if flow  0 -> LED spento (0 ms)
+        # if flow low   (2) -> Lampeggio lento (10000 ms)
+        # if flow hight (10) -> Lampeggio veloce (1000 ms)
         blue_speed = 0
         if flow == 0:
             blue_speed = 0
         elif flow < 5:
-            blue_speed = 500 # Lento
+            blue_speed = 5000 # Lento                500
         else:
-            blue_speed = 100 # Veloce
+            blue_speed = 1000 # Veloce               100
             
-        # 3. Costruzione Stringa Protocollo per Arduino
-        # Formato: "COLORE|MESSAGGIO|VELOCITA_BLU\n"
+        # 3. Making String for Arduino Protocol:
+        # Format is : "COLOR|MESSAGE|VELOCITY_OF_BLUE\n"
         comando_seriale = f"{traffic}|{display}|{blue_speed}\n"
         
-        # 4. Invio
+        # 4. SENDING
         arduino.write(comando_seriale.encode())
-        print(f"[TX ARDUINO] Inviato: {comando_seriale.strip()}")
+        
+        print(f"\n[TX ARDUINO] Sending: \n[TX ARDUINO]{comando_seriale.strip()}")
             
     except Exception as e:
-        print(f"[ERRORE] {e}")
+        print(f"[ERROR] {e}")
 
 # --- MAIN ---
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -85,6 +91,27 @@ client.username_pw_set(USER, PASSWORD)
 client.on_connect = on_connect
 client.on_message = on_message
 
-print("Avvio Bridge Tornello...")
+print("--------------------------------\n")
+print("Starting Turnstile Bridge...\n")
 client.connect(BROKER_ADDRESS, PORT, 60)
-client.loop_forever()
+
+# -- KEYBOARD INTERRUPT ---
+try:
+    client.loop_forever()                            # this stops the script to keep it in "listening mode"
+except KeyboardInterrupt:
+    print("--------------------------------\n")
+    print("\n[SYSTEM] Closing The Bridge ....\n")    #ctrl+c
+    
+finally:
+    print("[SYSTEM] Disconnecting from broker MQTT...\n")
+    client.disconnect()
+    print("-> Done. \n")
+    
+    if 'arduino' in locals() and arduino.is_open:
+        print("[SYSTEM] Closing serial port...")
+        arduino.close()
+        print("-> Done. \n")
+        
+    print("[SYSTEM] Bridge Switched Off correctly.")
+    print("\n")
+    sys.exit(0)
