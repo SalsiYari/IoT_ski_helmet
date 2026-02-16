@@ -1,7 +1,7 @@
 #include <LiquidCrystal.h>
 
-// --- CONFIGURAZIONE PIN ---
-int rosso1  = 2;
+// --- PIN SETTINGS ---
+int red1  = 2;
 int giallo1 = 3;
 int verde1  = 4;
 int blu1    = 5;
@@ -16,13 +16,13 @@ unsigned long previousMillis = 0;
 int intervalloBlu = 0;  // 0 = spento
 
 void setup() {
-  pinMode(rosso1, OUTPUT);
+  pinMode(red1, OUTPUT);
   pinMode(giallo1, OUTPUT);
   pinMode(verde1, OUTPUT);
   pinMode(blu1, OUTPUT);
 
   // Test iniziale luci
-  digitalWrite(rosso1, HIGH); delay(200); digitalWrite(rosso1, LOW);
+  digitalWrite(red1, HIGH); delay(200); digitalWrite(red1, LOW);
   digitalWrite(giallo1, HIGH); delay(200); digitalWrite(giallo1, LOW);
   digitalWrite(verde1, HIGH); delay(200); digitalWrite(verde1, LOW);
 
@@ -36,61 +36,60 @@ void setup() {
 }
 
 void loop() {
-  // 1. LETTURA SERIALE (Compatibile Arduino R4)
-  while (Serial.available()) {
+  
+  while (Serial.available()) {                // is there any byte to be read?
     char inChar = (char)Serial.read();
     
-    // Se arriva il comando di fine riga, eseguiamo
-    if (inChar == '\n') {
-      parseCommand(inputString);
+    if (inChar == '\n') {                   //end of string command
+      parseCommand(inputString);            //
       inputString = ""; // Reset stringa
     } else {
-      inputString += inChar; // Accumula caratteri
+      inputString += inChar;                // adding chars
     }
   }
 
-  // 2. GESTIONE LAMPEGGIO BLU (Non bloccante)
+  // 2. managing blu lithning  (blinking without delay ---> not blocking)
   if (intervalloBlu > 0) {
-    unsigned long currentMillis = millis();
-    if (currentMillis - previousMillis >= intervalloBlu) {
+    unsigned long currentMillis = millis();                         //millis starts from zero when i switch on the arduino
+    if (currentMillis - previousMillis >= intervalloBlu) {          //is passed enought time from last time we changed led?
       previousMillis = currentMillis;
       bluStato = !bluStato;
       digitalWrite(blu1, bluStato);
     }
   } else {
-    digitalWrite(blu1, LOW); // Spegni se intervallo è 0
+    digitalWrite(blu1, LOW);                                        // switch off in interval is zero
   }
 }
 
-// Funzione di Parsing: "COLORE|MESSAGGIO|VELOCITA_BLU"
+//  Parsing Function:  "COLOR|MESSAGE|BLU_VELOCITY"
 void parseCommand(String data) {
-  data.trim(); // Rimuove spazi vuoti
+  data.trim();          // remove white spaces
   
   int firstPipe = data.indexOf('|');
   int secondPipe = data.indexOf('|', firstPipe + 1);
 
   if (firstPipe > 0 && secondPipe > 0) {
-    String colorCmd = data.substring(0, firstPipe);
-    String lcdMsg = data.substring(firstPipe + 1, secondPipe);
-    String speedStr = data.substring(secondPipe + 1);
+    String colorCmd = data.substring(0, firstPipe);               //extract everything before fisrt pipe (color)
+    String lcdMsg = data.substring(firstPipe + 1, secondPipe);    //extraction message
+    String speedStr = data.substring(secondPipe + 1);             //velocity
     
     // --- AZIONI ---
 
-    // A. Semaforo
-    digitalWrite(rosso1, LOW);
+    // A. Traffic Lighta
+    digitalWrite(red1, LOW);
     digitalWrite(giallo1, LOW);
     digitalWrite(verde1, LOW);
 
-    if (colorCmd == "RED") digitalWrite(rosso1, HIGH);
+    if (colorCmd == "RED") digitalWrite(red1, HIGH);
     else if (colorCmd == "YELLOW") digitalWrite(giallo1, HIGH);
     else if (colorCmd == "GREEN") digitalWrite(verde1, HIGH);
 
     // B. LCD
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("STATO: " + colorCmd);
+    lcd.print("STATE: " + colorCmd);
     lcd.setCursor(0, 1);
-    // Tronca messaggio se troppo lungo per evitare errori grafici
+    //i need to "cut " the message over 16 char to avoid grapghics error
     if(lcdMsg.length() > 16) lcdMsg = lcdMsg.substring(0, 16);
     lcd.print(lcdMsg);
 
