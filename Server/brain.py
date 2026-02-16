@@ -1,73 +1,200 @@
+import sqlite3
 import paho.mqtt.client as mqtt
 import json
 import time
+import math  # <--- NUOVO: Serve per i calcoli trigonometrici GPS
 
 # --- CONFIGURAZIONE ---
 BROKER = "localhost"
 PORT = 1883
 USER = "skier"
-PASSWORD = "IoTskier1$" # <--- ricontrolla la password
+PASSWORD = "IoTskier1"
 
 # Topic Root
 ROOT_TOPIC = "unimore_ski"
 
-# --- DIGITAL TWIN state ---
-# here is stored the last telemetry known for each helmet
+# --- DIGITAL TWIN STATE ---
 digital_twin = {
-    "helmets": {},      # { "helmet_001": { "speed": 45, "hum": 85, "last_seen": 123456... } }
+    "helmets": {},      
     "meteo_global": "SERENO", 
     "tornelli": {
         "gate_A": "GREEN" 
     }
 }
 
-# Treshold èarameters
+# Parametri Soglia
 SOGLIA_NEBBIA_UMIDITA = 80.0
 SOGLIA_LUCE_BASSA = 300
-SOGLIA_AFFOLLAMENTO = 3    #low number as test 
+SOGLIA_AFFOLLAMENTO = 3 
 
-# --- MAIN LOGIC FUNCITONS ---
+# --- DATABASE SETUP ---
+DB_FILE = "ski_resort.db"
+
+def init_db():
+    """Inizializza il database se non esiste"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS helmet_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL,
+                device_id TEXT,
+                hum REAL,
+                temp REAL,
+                lux INTEGER,
+                speed_kmh REAL,  
+                fall_detected INTEGER
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS gate_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL,
+                status TEXT,
+                reason TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        print("[DB] Database inizializzato correttamente.")
+    except Exception as e:
+        print(f"[DB ERROR] Inizializzazione fallita: {e}")
+
+def log_helmet_data(device_id, payload):
+    """Salva i dati del casco nel DB"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        sensors = payload.get("sensors", {})
+        
+        # Recuperiamo la velocità che abbiamo calcolato noi nel main loop
+        speed = payload.get("calculated_speed_kmh", 0.0)
+        
+        cursor.execute('''
+            INSERT INTO helmet_logs (timestamp, device_id, hum, temp, lux, speed_kmh, fall_detected)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            time.time(),
+            device_id,
+            sensors.get("hum", 0),
+            sensors.get("temp", 0),
+            sensors.get("lux", 1000), 
+            speed,  # <--- Salviamo la velocità calcolata
+            0   
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB ERROR] Scrittura fallita: {e}")
+
+# --- FUNZIONI DI CALCOLO GEOGRAFICO (NUOVO) ---
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """
+    Calcola la distanza in METRI tra due coordinate GPS.
+    """
+    R = 6371000.0  # Raggio della Terra in metri
+    
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi / 2.0)**2 + \
+        math.cos(phi1) * math.cos(phi2) * \
+        math.sin(delta_lambda / 2.0)**2
+    
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    
+    meters = R * c
+    return meters
+
+def calcola_velocita(device_id, current_payload):
+    """
+    Confronta la posizione attuale con quella precedente salvata nel Digital Twin
+    e restituisce la velocità in km/h.
+
+    Per farlo dobbiamo usare la Formula dell'Haversine, che calcola la distanza reale tra due punti su una sfera (la Terra).
+    """
+    # Se non abbiamo uno storico per questo casco, velocità è 0
+    if device_id not in digital_twin["helmets"]:
+        return 0.0
+
+    prev_data = digital_twin["helmets"][device_id]
+    
+    # Estrazione dati attuali
+    curr_loc = current_payload.get("location", {})
+    curr_lat = curr_loc.get("lat", 0.0)
+    curr_lon = curr_loc.get("lon", 0.0)
+    curr_ts = current_payload.get("timestamp", time.time()) # Usa il timestamp del pacchetto!
+
+    # Estrazione dati precedenti
+    prev_loc = prev_data.get("location", {})
+    prev_lat = prev_loc.get("lat", 0.0)
+    prev_lon = prev_loc.get("lon", 0.0)
+    prev_ts = prev_data.get("timestamp", 0)
+
+    # Evitiamo calcoli se i dati sono identici o il tempo è 0 (pacchetti duplicati)
+    time_delta = curr_ts - prev_ts
+    if time_delta <= 0:
+        return 0.0
+
+    # Calcolo distanza
+    dist_meters = haversine_distance(prev_lat, prev_lon, curr_lat, curr_lon)
+    
+    # Calcolo velocità (Metri al secondo)
+    speed_ms = dist_meters / time_delta
+    
+    # Conversione in Km/h
+    speed_kmh = speed_ms * 3.6
+    
+    # Filtro rumore GPS: se si muove meno di 1 km/h consideriamolo fermo
+    if speed_kmh < 1.0:
+        speed_kmh = 0.0
+        
+    return round(speed_kmh, 2)
+
+# --- MAIN LOGIC FUNCTIONS ---
 
 def calcola_meteo_e_sicurezza(client):
-    """
-    Analizza i dati aggregati di TUTTI i caschi e comanda i tornelli.
-    """
     global digital_twin
     
     count_nebbia = 0
     totale_caschi_attivi = 0
     now = time.time()
 
-    # Analisi Caschi (Pulizia vecchi dati > 60 secondi fa)
     caschi_ids = list(digital_twin["helmets"].keys())
+    
     for helmet_id in caschi_ids:
         dati = digital_twin["helmets"][helmet_id]
         
-        # Se il dato è vecchio di 1 minuto, ignoralo (sciatore andato via/spento)
+        # Timeout
         if now - dati.get("ts_ricezione", 0) > 60:
             continue
             
         totale_caschi_attivi += 1
         
-        # Logica rilevamento nebbia del singolo casco
-        env = dati.get("env", {})
-        if env.get("hum", 0) > SOGLIA_NEBBIA_UMIDITA and env.get("lux", 1000) < SOGLIA_LUCE_BASSA:
+        sensors = dati.get("sensors", {})
+        umidita = sensors.get("hum", 0)
+        luce = sensors.get("lux", 1000) 
+
+        if umidita > SOGLIA_NEBBIA_UMIDITA and luce < SOGLIA_LUCE_BASSA:
             count_nebbia += 1
 
-    # Decisione Meteo Globale
+    nuovo_meteo = "SERENO"
     if totale_caschi_attivi > 0 and (count_nebbia / totale_caschi_attivi) > 0.3:
-        digital_twin["meteo_global"] = "NEBBIA"
-    else:
-        digital_twin["meteo_global"] = "SERENO"
-
-    print(f"[LOGICA] Caschi Attivi: {totale_caschi_attivi} | Meteo: {digital_twin['meteo_global']}")
-
-    # --- COMANDO TORNELLI ---
-    # Logica: Nebbia O Troppa Gente -> Chiudi
+        nuovo_meteo = "NEBBIA"
     
+    digital_twin["meteo_global"] = nuovo_meteo
+
+    print(f"[LOGICA] Caschi: {totale_caschi_attivi} | Meteo: {nuovo_meteo}")
+
+    # --- LOGICA TORNELLI ---
     stato_richiesto = "GREEN"
     msg_display = "BENVENUTI - APERTO"
-    flow = 10 # Frequenza alta
+    flow = 10 
     
     if digital_twin["meteo_global"] == "NEBBIA":
         stato_richiesto = "RED"
@@ -76,80 +203,74 @@ def calcola_meteo_e_sicurezza(client):
     elif totale_caschi_attivi >= SOGLIA_AFFOLLAMENTO:
         stato_richiesto = "YELLOW"
         msg_display = "RALLENTARE - AFFOLLATO"
-        flow = 2 # Frequenza bassa
+        flow = 2
 
-    # Inviamo il comando SOLO se lo stato cambia (per non intasare la rete)
     if digital_twin["tornelli"]["gate_A"] != stato_richiesto:
         digital_twin["tornelli"]["gate_A"] = stato_richiesto
-        
         payload_tornello = {
-            "traffic_light": stato_richiesto, # RED, GREEN, YELLOW
+            "traffic_light": stato_richiesto,
             "display_msg": msg_display,
             "flow_rate": flow
         }
-        
         topic_tornello = f"{ROOT_TOPIC}/turnstiles/gate_A/set"
-        print(f"[CMD] Invio comando a {topic_tornello}: {payload_tornello}")
+        print(f"[CMD] Cambio Stato -> {stato_richiesto}")
         client.publish(topic_tornello, json.dumps(payload_tornello), retain=True)
-
 
 # --- CALLBACKS MQTT ---
 
 def on_connect(client, userdata, flags, rc, properties=None):
     print(f"[SYSTEM] Connesso al Broker (Codice: {rc})")
-    # Sottoscrizione con wildcard per ricevere dati da TUTTI i caschi
-    # + indica "qualsiasi stringa a quel livello"
-    # Riceviamo sia telemetry che event
     client.subscribe(f"{ROOT_TOPIC}/helmets/+/telemetry")
     client.subscribe(f"{ROOT_TOPIC}/helmets/+/event")
 
 def on_message(client, userdata, msg):
     global digital_twin
     topic = msg.topic
-    payload_str = msg.payload.decode()
     
     try:
-        payload = json.loads(payload_str)
+        payload = json.loads(msg.payload.decode())
         
-        # Parsing del topic per estrarre l'ID del casco
-        # Topic atteso: unimore_ski/helmets/helmet_001/telemetry
+        # FIX: Parsing corretto del topic in 4 parti
         parts = topic.split("/")
-        device_type = parts[2] # helmets
-        device_id = parts[3]   # helmet_001
-        msg_type = parts[4]    # telemetry O event
+        if len(parts) < 4: return 
+
+        device_type = parts[1] # Indice 1 = helmets
+        device_id = parts[2]   # Indice 2 = ID del casco
+        msg_type = parts[3]    # Indice 3 = telemetry O event
 
         if device_type == "helmets":
-            # Aggiungiamo un timestamp di ricezione lato server
+            # Timestamp ricezione server
             payload["ts_ricezione"] = time.time()
             
             if msg_type == "telemetry":
-                # Aggiorniamo lo stato del casco nel Digital Twin
+                # --- 1. CALCOLO VELOCITÀ ---
+                speed_kmh = calcola_velocita(device_id, payload)
+                payload["calculated_speed_kmh"] = speed_kmh
+                print(f"[INFO] {device_id} Speed: {speed_kmh} km/h")
+
+                # --- 2. AGGIORNAMENTO STATO ---
                 digital_twin["helmets"][device_id] = payload
-                # Eseguiamo la logica globale (Nebbia, etc.)
+                log_helmet_data(device_id, payload)
                 calcola_meteo_e_sicurezza(client)
                 
             elif msg_type == "event":
-                print(f"[ALARM] Evento critico da {device_id}: {payload}")
-                # Qui potresti gestire la caduta (Type: FALL_DETECTED)
-                if payload.get("type") == "FALL_DETECTED":
-                    print("!!! ATTENZIONE: CADUTA RILEVATA !!!")
-                    # Esempio: Invia comando SOS a tutti i caschi vicini
-                    # client.publish(f"{ROOT_TOPIC}/helmets/all/cmd", json.dumps({"alert": "SOS NEARBY"}))
+                print(f"[ALARM] Evento da {device_id}: {payload}")
 
     except Exception as e:
-        print(f"Errore elaborazione messaggio: {e}")
+        print(f"Errore messaggio: {e}")
 
 # --- MAIN ---
-client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+if __name__ == "__main__":
+    init_db()
+    
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.username_pw_set(USER, PASSWORD)
+    client.on_connect = on_connect
+    client.on_message = on_message
 
-client.username_pw_set(USER, PASSWORD)
-client.on_connect = on_connect
-client.on_message = on_message
-
-print("Avvio Server Digital Twin (Unimore Ski)...")
-try:
-    client.connect(BROKER, PORT, 60)
-    client.loop_forever()
-except KeyboardInterrupt:
-    print("Spegnimento...")
-
+    print("Avvio Server Digital Twin (Unimore Ski)...")
+    try:
+        client.connect(BROKER, PORT, 60)
+        client.loop_forever()
+    except KeyboardInterrupt:
+        print("Spegnimento...")
