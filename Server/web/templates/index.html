@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unimore Ski - IoT Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; margin: 0; padding: 0; color: #2c3e50; }
+        
+        .main-content { padding: 20px; }
+        .header { text-align: center; margin-bottom: 30px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; max-width: 1200px; margin: 0 auto; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); text-align: center; display: flex; flex-direction: column;}
+        
+        /* 4-Gates Grid Layout */
+        .gates-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-top: 15px; }
+        .gate-box { background: #ecf0f1; padding: 10px; border-radius: 8px; }
+        .gate-box h4 { margin: 0 0 10px 0; font-size: 15px; color: #34495e; }
+        .gate-status { padding: 10px; border-radius: 6px; color: white; font-weight: bold; font-size: 18px; transition: background-color 0.3s; }
+        .gate-reason { font-size: 11px; margin-top: 8px; color: #7f8c8d; font-weight: bold; text-transform: uppercase; }
+
+        .GREEN { background-color: #2ecc71; }
+        .YELLOW { background-color: #f1c40f; color: #333; }
+        .RED { background-color: #e74c3c; }
+        .OFF { background-color: #7f8c8d; }
+        .UNKNOWN { background-color: #bdc3c7; }
+
+        .big-number { font-size: 40px; font-weight: bold; color: #3498db; margin: 10px 0; }
+        
+        /* Dashboard Stats Rows */
+        .stat-row { display: flex; justify-content: space-around; margin-top: 15px; }
+        .stat-item h4 { margin: 0; color: #7f8c8d; font-size: 14px; }
+        .stat-item p { margin: 5px 0 0 0; font-size: 22px; font-weight: bold; color: #2c3e50; }
+
+        /* Helmets Table */
+        .table-container { max-height: 150px; overflow-y: auto; margin-top: 15px; border-top: 1px solid #ecf0f1; padding-top: 10px; text-align: left; flex-grow: 1;}
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 8px; border-bottom: 1px solid #f4f7f6; font-size: 14px;}
+        th { position: sticky; top: 0; background: white; color: #7f8c8d; }
+
+        /* Scrollable Emergencies */
+        .scrollable-list { max-height: 200px; overflow-y: auto; text-align: left; list-style: none; padding: 0; margin: 10px 0; border: 1px solid #ecf0f1; border-radius: 5px; flex-grow: 1;}
+        .scrollable-list li { background: #fff3cd; padding: 12px; margin-bottom: 2px; border-left: 5px solid #dc3545; font-size: 14px;}
+        .scrollable-list::-webkit-scrollbar, .table-container::-webkit-scrollbar { width: 6px; }
+        .scrollable-list::-webkit-scrollbar-thumb, .table-container::-webkit-scrollbar-thumb { background: #bdc3c7; border-radius: 4px; }
+
+        .chart-container { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 1200px; margin: 20px auto; }
+        
+        /* Full Width Map */
+        .full-width-map { width: 100vw; max-height: 600px; object-fit: contain; background: white; display: block; margin-top: 40px; }
+    </style>
+</head>
+<body>
+
+    <div class="main-content">
+        <div class="header">
+            <h1>🏂 Unimore Ski Resort - Digital Twin</h1>
+            <p>Real-time Telemetry & Multi-Gate Command Center</p>
+        </div>
+
+        <div class="grid">
+            <div class="card" style="grid-column: span 1;">
+                <h3>Turnstiles Status</h3>
+                <div class="gates-grid">
+                    <div class="gate-box">
+                        <h4>A1 (Ski-lift)</h4>
+                        <div id="status-A1" class="gate-status UNKNOWN">...</div>
+                        <div id="reason-A1" class="gate-reason">-</div>
+                    </div>
+                    <div class="gate-box">
+                        <h4>A2 (2-Seater)</h4>
+                        <div id="status-A2" class="gate-status UNKNOWN">...</div>
+                        <div id="reason-A2" class="gate-reason">-</div>
+                    </div>
+                    <div class="gate-box">
+                        <h4>A3 (Gondola)</h4>
+                        <div id="status-A3" class="gate-status UNKNOWN">...</div>
+                        <div id="reason-A3" class="gate-reason">-</div>
+                    </div>
+                    <div class="gate-box">
+                        <h4>A4 (4-Seater)</h4>
+                        <div id="status-A4" class="gate-status UNKNOWN">...</div>
+                        <div id="reason-A4" class="gate-reason">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>Active Skiers</h3>
+                <div id="active-helmets" class="big-number">0</div>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Helmet ID</th>
+                                <th>Avg Speed</th>
+                            </tr>
+                        </thead>
+                        <tbody id="helmets-tbody">
+                            <tr><td colspan="2" style="text-align:center;">No active skiers</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div class="stat-row" style="margin-top: auto; border-top: 1px solid #ecf0f1; padding-top: 15px;">
+                    <div class="stat-item">
+                        <h4>Global Slope Meteo</h4>
+                        <p id="avg-temp">-- °C</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>🚨 Fall Incidents Log</h3>
+                <ul class="scrollable-list" id="falls-list">
+                    <li>No incidents recorded.</li>
+                </ul>
+                <div class="stat-row" style="margin-top: 10px; border-top: 1px solid #ecf0f1; padding-top: 15px;">
+                    <div class="stat-item">
+                        <h4>Avg Speed (1h)</h4>
+                        <p><span id="avg-speed">0</span> km/h</p>
+                    </div>
+                    <div class="stat-item">
+                        <h4>Max Speed (1h)</h4>
+                        <p style="color: #e74c3c;"><span id="max-speed">0</span> km/h</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <h3>📈 Environmental Trends (Live)</h3>
+            <canvas id="telemetryChart" height="80"></canvas>
+        </div>
+    </div>
+
+    <img src="{{ url_for('static', filename='map.jpeg') }}" class="full-width-map" alt="Resort Area Map">
+
+    <script>
+        const ctx = document.getElementById('telemetryChart').getContext('2d');
+        const telemetryChart = new Chart(ctx, {
+            type: 'line',
+            data: { labels: [], datasets: [
+                { label: 'Humidity (%)', borderColor: '#3498db', data: [], tension: 0.3 },
+                { label: 'Estimated Brightness', borderColor: '#f1c40f', data: [], tension: 0.3 }
+            ]},
+            options: { responsive: true, animation: false }
+        });
+
+        function updateDashboard() {
+            fetch('/api/dashboard')
+                .then(response => response.json())
+                .then(data => {
+                    
+                    // 1. Update the 4 Gates
+                    ['A1', 'A2', 'A3', 'A4'].forEach(gateId => {
+                        const gateData = data.gates[gateId];
+                        const statusDiv = document.getElementById('status-' + gateId);
+                        const reasonDiv = document.getElementById('reason-' + gateId);
+                        
+                        statusDiv.className = 'gate-status ' + gateData.status;
+                        statusDiv.innerText = gateData.status;
+                        reasonDiv.innerText = gateData.reason;
+                    });
+
+                    // 2. Update General Stats
+                    document.getElementById('avg-temp').innerText = data.stats.avg_temp + " °C";
+                    document.getElementById('avg-speed').innerText = data.stats.avg_speed;
+                    document.getElementById('max-speed').innerText = data.stats.max_speed;
+
+                    // 3. Update Active Helmets Count & Table
+                    document.getElementById('active-helmets').innerText = data.active_helmets;
+                    const helmetsTbody = document.getElementById('helmets-tbody');
+                    if (data.active_details.length > 0) {
+                        helmetsTbody.innerHTML = '';
+                        data.active_details.forEach(h => {
+                            helmetsTbody.innerHTML += `<tr><td><b>${h.id}</b></td><td>${h.speed} km/h</td></tr>`;
+                        });
+                    } else {
+                        helmetsTbody.innerHTML = '<tr><td colspan="2" style="text-align:center;">No active skiers</td></tr>';
+                    }
+
+                    // 4. Update Falls (Added 'piste' info)
+                    const fallsList = document.getElementById('falls-list');
+                    if (data.falls.length > 0) {
+                        fallsList.innerHTML = '';
+                        data.falls.forEach(fall => {
+                            const date = new Date(fall.time * 1000).toLocaleString('en-GB');
+                            const pista_name = fall.piste ? fall.piste : "UNKNOWN";
+                            fallsList.innerHTML += `<li><b>${date}</b><br>Fall on <b>${pista_name}</b> (Helmet: ${fall.device})</li>`;
+                        });
+                    } else {
+                        fallsList.innerHTML = '<li style="border-left-color: #2ecc71;">No incidents recorded.</li>';
+                    }
+
+                    // 5. Update Chart
+                    telemetryChart.data.labels = data.chart.labels;
+                    telemetryChart.data.datasets[0].data = data.chart.humidity;
+                    telemetryChart.data.datasets[1].data = data.chart.light;
+                    telemetryChart.update();
+                })
+                .catch(err => console.error("API Error: ", err));
+        }
+
+        setInterval(updateDashboard, 2000);
+        updateDashboard();
+    </script>
+</body>
+</html>

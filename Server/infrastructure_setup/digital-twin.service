@@ -1,0 +1,14 @@
+[Unit]
+Description=IoT Ski Digital Twin Logic
+After=network.target mosquitto.service
+
+[Service]
+User=root
+WorkingDirectory=/root/iot_project
+# Percorso python venv e script
+ExecStart=/root/iot_project/venvIot/bin/python /root/iot_project/brain.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=IoT Ski Web Dashboard
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/iot_project/web
+ExecStart=/root/iot_project/venvIot/bin/python web_app.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
